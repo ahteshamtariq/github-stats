@@ -11,6 +11,7 @@ issue_contributions: u32 = 0,
 commit_contributions: u32 = 0,
 pr_contributions: u32 = 0,
 review_contributions: u32 = 0,
+restricted_contributions: u32 = 0,
 
 const Statistics = @This();
 
@@ -250,33 +251,42 @@ fn getReposByYear(
         .{ months, if (months != 1) "s" else "", start_month + 1, year },
     );
     const response = try context.client.graphql(
+        \\fragment Repo on Repository {
+        \\  nameWithOwner
+        \\  stargazerCount
+        \\  forkCount
+        \\  isPrivate
+        \\  languages(
+        \\      first: 100,
+        \\      orderBy: { direction: DESC, field: SIZE }
+        \\  ) {
+        \\    edges {
+        \\      size
+        \\      node {
+        \\        name
+        \\        color
+        \\      }
+        \\    }
+        \\  }
+        \\}
         \\query ($from: DateTime, $to: DateTime) {
         \\  viewer {
+        \\    repositoriesContributedTo(
+        \\        first: 100,
+        \\        includeUserRepositories: false,
+        \\        contributionTypes: [COMMIT, PULL_REQUEST, PULL_REQUEST_REVIEW]
+        \\    ) {
+        \\      nodes { ...Repo }
+        \\    }
         \\    contributionsCollection(from: $from, to: $to) {
         \\      totalRepositoryContributions
         \\      totalIssueContributions
         \\      totalCommitContributions
         \\      totalPullRequestContributions
         \\      totalPullRequestReviewContributions
+        \\      restrictedContributionsCount
         \\      commitContributionsByRepository(maxRepositories: 100) {
-        \\        repository {
-        \\          nameWithOwner
-        \\          stargazerCount
-        \\          forkCount
-        \\          isPrivate
-        \\          languages(
-        \\              first: 100,
-        \\              orderBy: { direction: DESC, field: SIZE }
-        \\          ) {
-        \\            edges {
-        \\              size
-        \\              node {
-        \\                name
-        \\                color
-        \\              }
-        \\            }
-        \\          }
-        \\        }
+        \\        repository { ...Repo }
         \\      }
         \\    }
         \\  }
@@ -306,37 +316,41 @@ fn getReposByYear(
         );
         return error.RequestFailed;
     }
-    const stats = (try std.json.parseFromSliceLeaky(
+    const RawRepo = struct {
+        nameWithOwner: []const u8,
+        stargazerCount: u32,
+        forkCount: u32,
+        isPrivate: bool,
+        languages: ?struct {
+            edges: ?[]struct {
+                size: u32,
+                node: struct {
+                    name: []const u8,
+                    color: ?[]const u8,
+                },
+            },
+        },
+    };
+    const viewer = (try std.json.parseFromSliceLeaky(
         struct { data: struct { viewer: struct {
+            repositoriesContributedTo: struct { nodes: []?RawRepo },
             contributionsCollection: struct {
                 totalRepositoryContributions: u32,
                 totalIssueContributions: u32,
                 totalCommitContributions: u32,
                 totalPullRequestContributions: u32,
                 totalPullRequestReviewContributions: u32,
+                restrictedContributionsCount: u32,
                 commitContributionsByRepository: []struct {
-                    repository: struct {
-                        nameWithOwner: []const u8,
-                        stargazerCount: u32,
-                        forkCount: u32,
-                        isPrivate: bool,
-                        languages: ?struct {
-                            edges: ?[]struct {
-                                size: u32,
-                                node: struct {
-                                    name: []const u8,
-                                    color: ?[]const u8,
-                                },
-                            },
-                        },
-                    },
+                    repository: RawRepo,
                 },
             },
         } } },
         context.arena.allocator(),
         response.body,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    )).data.viewer.contributionsCollection;
+    )).data.viewer;
+    const stats = viewer.contributionsCollection;
     std.log.info(
         "Parsed {d} total repositories from {d}",
         .{ stats.commitContributionsByRepository.len, year },
@@ -376,9 +390,23 @@ fn getReposByYear(
     context.result.pr_contributions += stats.totalPullRequestContributions;
     context.result.review_contributions +=
         stats.totalPullRequestReviewContributions;
+    context.result.restricted_contributions +=
+        stats.restrictedContributionsCount;
 
+    // GitHub reports private org work as "restricted" contributions, so
+    // commitContributionsByRepository omits those repos even when the token
+    // can read them. repositoriesContributedTo still lists them.
+    // ponytail: refetched for every year range (deduped by `seen`) and capped
+    // at 100 repos with no pagination; fetch once and paginate if that's hit.
+    var raw_repos: std.ArrayList(RawRepo) = .empty;
     for (stats.commitContributionsByRepository) |x| {
-        const raw_repo = x.repository;
+        try raw_repos.append(context.arena.allocator(), x.repository);
+    }
+    for (viewer.repositoriesContributedTo.nodes) |node| {
+        if (node) |r| try raw_repos.append(context.arena.allocator(), r);
+    }
+
+    for (raw_repos.items) |raw_repo| {
         if (context.seen.get(raw_repo.nameWithOwner) orelse false) {
             std.log.debug(
                 "Skipping {s} (seen)",

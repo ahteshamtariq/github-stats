@@ -261,7 +261,8 @@ pub fn main(init: std.process.Init) !void {
             stats.issue_contributions +
             stats.commit_contributions +
             stats.pr_contributions +
-            stats.review_contributions,
+            stats.review_contributions +
+            stats.restricted_contributions,
         .languages = try .init(allocator, &.{}, &.{}),
         .language_colors = try .init(allocator, &.{}, &.{}),
         .name = stats.name,
