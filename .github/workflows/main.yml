@@ -43,7 +43,7 @@ jobs:
       env:
         ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
         EXCLUDE_REPOS: ${{ secrets.EXCLUDE_REPOS || 'ahteshamtariq/github-stats' }}
-        EXCLUDE_LANGS: ${{ secrets.EXCLUDE_LANGS }}
+        EXCLUDE_LANGS: ${{ secrets.EXCLUDE_LANGS || 'Jupyter Notebook,HTML' }}
         EXCLUDE_PRIVATE: "false"
         SILENT: "true"
         # TODO: Remove this when they get their API working again
